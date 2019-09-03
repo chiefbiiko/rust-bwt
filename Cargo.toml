@@ -5,7 +5,9 @@ authors = ["nschwarz <noah.anabiik.schwarz@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-chacha20-poly1305-aead = "0.1.2"
-curve25519-dalek = "1.2.3"
+rust-crypto = "0.2.36"
 lazy_static = "1.4.0"
 serde_json = "1.0.40"
+base64 = "0.10.1"
+num_enum = "0.4.1"
+failure = "0.1.5"
