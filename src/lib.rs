@@ -1,49 +1,75 @@
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate failure;
+// #[macro_use]
+// extern crate lazy_static;
 
 use base64::encode as base64_encode;
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use serde_json::Value;
 
-use std::convert::TryFrom;
-use std::convert::TryInto;
+use std::convert::{From, TryFrom, TryInto};
+use std::error::Error;
+use std::fmt;
 
-lazy_static! {
-    static ref CURVE25519: () = {};
-}
+use core::array::TryFromSliceError;
+
+// lazy_static! {
+//     static ref CURVE25519: () = {};
+// }
 
 pub const MIN_SUPPORTED_VERSION: u8 = 0;
 pub const MAX_SUPPORTED_VERSION: u8 = 0;
-
-pub const MAGIC_BWT: [u8; 4] = [66, 87, 84, 0];
-
+pub const MAGIC_BWT: [u8; 3] = [66, 87, 84];
 pub const MAX_TOKEN_CHARS: usize = 4096;
-
 pub const SECRET_KEY_BYTES: usize = 32;
-
 pub const PUBLIC_KEY_BYTES: usize = 32;
-
+pub const NONCE_BYTES: usize = 12;
 pub const KID_BYTES: usize = 16;
-
 pub const BASE64_KID_CHARS: usize = 24;
-
 pub const HEADER_BYTES: usize = 48;
 
-#[derive(Fail, Debug)]
+#[derive(Debug)]
 pub enum BWTError {
-    #[fail(display = "{} is not a valid BWT version.", _0)]
-    UnsupportedVersion(u8),
-    #[fail(display = "Invalid header bytes: {}", _0)]
-    InvalidHeaderBytes(usize),
-    #[fail(display = "Invalid magic bytes")]
     InvalidMagicBytes,
-    #[fail(display = "An unknown error has occurred.")]
-    Unknown,
+    InvalidHeaderBytes(usize),
+    UnsupportedVersion(u8),
+    Other(Box<dyn Error>),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
+impl Error for BWTError {
+    fn source(self: &BWTError) -> Option<&(dyn Error + 'static)> {
+        match self {
+            // The cause is the underlying implementation error type. Is implicitly
+            // cast to the trait object `&error::Error`. This works because the
+            // underlying type already implements the `Error` trait.
+            BWTError::Other(err) => Some(&**err),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for BWTError {
+    fn fmt(self: &BWTError, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BWTError::InvalidMagicBytes => write!(f, "invalid magic bytes"),
+            BWTError::InvalidHeaderBytes(n) => write!(f, "invalid number of header bytes {}", n),
+            BWTError::UnsupportedVersion(version) => write!(f, "unsupported version {}", version),
+            BWTError::Other(err) => err.fmt(f),
+        }
+    }
+}
+
+impl From<TryFromPrimitiveError<Typ>> for BWTError {
+    fn from(err: TryFromPrimitiveError<Typ>) -> BWTError {
+        BWTError::Other(Box::new(err))
+    }
+}
+
+impl From<TryFromSliceError> for BWTError {
+    fn from(err: TryFromSliceError) -> BWTError {
+        BWTError::Other(Box::new(err))
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum Typ {
     BWTv0,
@@ -88,18 +114,16 @@ pub struct InternalHeader {
     iat: u64,
     exp: u64,
     kid: [u8; KID_BYTES],
-    nonce: [u8; 12],
+    nonce: [u8; NONCE_BYTES],
     base64_kid: String,
 }
 
-// CLARIFY: does .unwrap() bubble errors down the stack or it just panics?
-
 fn try_derive_typ(buf: &[u8]) -> Result<Typ, BWTError> {
-    let version: u8 = buf[4];
+    let version: u8 = buf[3];
 
     let mut diff: u8 = 0;
 
-    for i in 0..4 {
+    for i in 0..3 {
         diff |= buf[i] ^ MAGIC_BWT[i];
     }
 
@@ -108,56 +132,69 @@ fn try_derive_typ(buf: &[u8]) -> Result<Typ, BWTError> {
     } else if version < MIN_SUPPORTED_VERSION || version > MAX_SUPPORTED_VERSION {
         Err(BWTError::UnsupportedVersion(version))
     } else {
-        Ok(Typ::try_from(version).unwrap())
+        Ok(Typ::try_from(version)?)
     }
 }
 
-impl InternalHeader {
-    fn from_buffer(buf: &[u8]) -> Result<InternalHeader, BWTError> {
+impl TryFrom<&[u8]> for InternalHeader {
+    type Error = BWTError;
+    fn try_from(buf: &[u8]) -> Result<InternalHeader, BWTError> {
         if buf.len() < HEADER_BYTES {
             Err(BWTError::InvalidHeaderBytes(buf.len()))
         } else {
             Ok(InternalHeader {
                 typ: try_derive_typ(buf)?,
-                iat: u64::from_be_bytes(buf[4..12].try_into().unwrap()),
-                exp: u64::from_be_bytes(buf[12..20].try_into().unwrap()),
-                kid: buf[20..36].try_into().unwrap(),
-                nonce: buf[36..48].try_into().unwrap(),
+                iat: u64::from_be_bytes(buf[4..12].try_into()?),
+                exp: u64::from_be_bytes(buf[12..20].try_into()?),
+                kid: buf[20..36].try_into()?,
+                nonce: buf[36..48].try_into()?,
                 base64_kid: base64_encode(&buf[20..36]).to_string(),
             })
         }
     }
+}
 
-    fn from_header_and_nonce(header: &Header, nonce: &[u8]) -> Result<InternalHeader, BWTError> {
+impl TryFrom<(&Header, &[u8])> for InternalHeader {
+    type Error = BWTError;
+    fn try_from((header, nonce): (&Header, &[u8])) -> Result<InternalHeader, BWTError> {
         Ok(InternalHeader {
-            typ: header.typ.clone(),
+            typ: header.typ,
             iat: header.iat,
             exp: header.exp,
             kid: header.kid,
-            nonce: nonce.try_into().unwrap(),
+            nonce: nonce.try_into()?,
             base64_kid: base64_encode(&header.kid).to_string(),
         })
     }
+}
 
-    fn to_buffer(self: &InternalHeader, buf: &mut [u8]) -> Result<(), BWTError> {
-        buf[0..4].copy_from_slice(&MAGIC_BWT);
+impl Into<Header> for InternalHeader {
+    fn into(self: InternalHeader) -> Header {
+        Header {
+            typ: self.typ,
+            iat: self.iat,
+            exp: self.exp,
+            kid: self.kid,
+        }
+    }
+}
+
+impl Into<[u8; HEADER_BYTES]> for InternalHeader {
+    fn into(self: InternalHeader) -> [u8; HEADER_BYTES] {
+        let mut buf: [u8; HEADER_BYTES] = [0u8; HEADER_BYTES];
+
+        buf[0..3].copy_from_slice(&MAGIC_BWT);
+        buf[3] = self.typ.into();
         buf[4..12].copy_from_slice(&self.iat.to_be_bytes());
         buf[12..20].copy_from_slice(&self.exp.to_be_bytes());
         buf[20..36].copy_from_slice(&self.kid);
         buf[36..48].copy_from_slice(&self.nonce);
 
-        Ok(())
-    }
-
-    fn to_header(self: &InternalHeader) -> Result<Header, BWTError> {
-        Ok(Header {
-            typ: self.typ.clone(),
-            iat: self.iat,
-            exp: self.exp,
-            kid: self.kid.try_into().unwrap(),
-        })
+        buf
     }
 }
+
+// TODO: impl From<Vec<PeerPublicKey>> for HashMap<String, &[u8]>
 
 // /** Creates a nonce generator that is based on the current timestamp. */
 // function* createNonceGenerator(): Generator {

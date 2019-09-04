@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_header_marshalling() -> () {
+fn test_header_marshalling() -> Result<(), Box<Error>> {
     let internal_header: InternalHeader = InternalHeader {
         typ: Typ::BWTv0,
         iat: 1,
@@ -18,16 +18,14 @@ fn test_header_marshalling() -> () {
         kid: [0u8; 16],
     };
 
-    let mut buf: [u8; HEADER_BYTES] = [0u8; HEADER_BYTES];
+    let buf: [u8; HEADER_BYTES] = internal_header.clone().into();
 
-    internal_header.to_buffer(&mut buf).unwrap();
-
-    let internal_header_a: InternalHeader = InternalHeader::from_buffer(&buf).unwrap();
+    let internal_header_a: InternalHeader = InternalHeader::try_from(&buf[..])?;
 
     let internal_header_b: InternalHeader =
-        InternalHeader::from_header_and_nonce(&header, &internal_header.nonce).unwrap();
+        InternalHeader::try_from((&header, &internal_header.nonce[..]))?;
 
-    let header_a: Header = internal_header.to_header().unwrap();
+    let header_a: Header = internal_header.clone().into();
 
     assert_eq!(internal_header_a.nonce, internal_header.nonce);
     assert_eq!(internal_header_a.typ, internal_header.typ);
@@ -45,4 +43,6 @@ fn test_header_marshalling() -> () {
     assert_eq!(header_a.iat, header.iat);
     assert_eq!(header_a.exp, header.exp);
     assert_eq!(header_a.kid, header.kid);
+
+    Ok(())
 }
