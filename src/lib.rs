@@ -5,9 +5,11 @@ use base64::encode as base64_encode;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use serde_json::Value;
 
+use std::collections::HashMap;
 use std::convert::{From, TryFrom, TryInto};
 use std::error::Error;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use core::array::TryFromSliceError;
 
@@ -32,41 +34,6 @@ pub enum BWTError {
     InvalidHeaderBytes(usize),
     UnsupportedVersion(u8),
     Other(Box<dyn Error>),
-}
-
-impl Error for BWTError {
-    fn source(self: &BWTError) -> Option<&(dyn Error + 'static)> {
-        match self {
-            // The cause is the underlying implementation error type. Is implicitly
-            // cast to the trait object `&error::Error`. This works because the
-            // underlying type already implements the `Error` trait.
-            BWTError::Other(err) => Some(&**err),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for BWTError {
-    fn fmt(self: &BWTError, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            BWTError::InvalidMagicBytes => write!(f, "invalid magic bytes"),
-            BWTError::InvalidHeaderBytes(n) => write!(f, "invalid number of header bytes {}", n),
-            BWTError::UnsupportedVersion(version) => write!(f, "unsupported version {}", version),
-            BWTError::Other(err) => err.fmt(f),
-        }
-    }
-}
-
-impl From<TryFromPrimitiveError<Typ>> for BWTError {
-    fn from(err: TryFromPrimitiveError<Typ>) -> BWTError {
-        BWTError::Other(Box::new(err))
-    }
-}
-
-impl From<TryFromSliceError> for BWTError {
-    fn from(err: TryFromSliceError) -> BWTError {
-        BWTError::Other(Box::new(err))
-    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
@@ -118,21 +85,41 @@ pub struct InternalHeader {
     base64_kid: String,
 }
 
-fn try_derive_typ(buf: &[u8]) -> Result<Typ, BWTError> {
-    let version: u8 = buf[3];
+#[derive(Clone, Debug)]
+struct PeerPublicKeyMap(HashMap<String, [u8; PUBLIC_KEY_BYTES]>);
 
-    let mut diff: u8 = 0;
-
-    for i in 0..3 {
-        diff |= buf[i] ^ MAGIC_BWT[i];
+impl Error for BWTError {
+    fn source(self: &BWTError) -> Option<&(dyn Error + 'static)> {
+        match self {
+            // The cause is the underlying implementation error type. Is implicitly
+            // cast to the trait object `&error::Error`. This works because the
+            // underlying type already implements the `Error` trait.
+            BWTError::Other(err) => Some(&**err),
+            _ => None,
+        }
     }
+}
 
-    if diff != 0 {
-        Err(BWTError::InvalidMagicBytes)
-    } else if version < MIN_SUPPORTED_VERSION || version > MAX_SUPPORTED_VERSION {
-        Err(BWTError::UnsupportedVersion(version))
-    } else {
-        Ok(Typ::try_from(version)?)
+impl fmt::Display for BWTError {
+    fn fmt(self: &BWTError, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BWTError::InvalidMagicBytes => write!(f, "invalid magic bytes"),
+            BWTError::InvalidHeaderBytes(n) => write!(f, "invalid number of header bytes {}", n),
+            BWTError::UnsupportedVersion(version) => write!(f, "unsupported version {}", version),
+            BWTError::Other(err) => err.fmt(f),
+        }
+    }
+}
+
+impl From<TryFromPrimitiveError<Typ>> for BWTError {
+    fn from(err: TryFromPrimitiveError<Typ>) -> BWTError {
+        BWTError::Other(Box::new(err))
+    }
+}
+
+impl From<TryFromSliceError> for BWTError {
+    fn from(err: TryFromSliceError) -> BWTError {
+        BWTError::Other(Box::new(err))
     }
 }
 
@@ -148,7 +135,7 @@ impl TryFrom<&[u8]> for InternalHeader {
                 exp: u64::from_be_bytes(buf[12..20].try_into()?),
                 kid: buf[20..36].try_into()?,
                 nonce: buf[36..48].try_into()?,
-                base64_kid: base64_encode(&buf[20..36]).to_string(),
+                base64_kid: base64_encode(&buf[20..36]),
             })
         }
     }
@@ -163,7 +150,7 @@ impl TryFrom<(&Header, &[u8])> for InternalHeader {
             exp: header.exp,
             kid: header.kid,
             nonce: nonce.try_into()?,
-            base64_kid: base64_encode(&header.kid).to_string(),
+            base64_kid: base64_encode(&header.kid),
         })
     }
 }
@@ -194,7 +181,80 @@ impl Into<[u8; HEADER_BYTES]> for InternalHeader {
     }
 }
 
-// TODO: impl From<Vec<PeerPublicKey>> for HashMap<String, &[u8]>
+impl From<&[PeerPublicKey]> for PeerPublicKeyMap {
+    fn from(peer_public_keys: &[PeerPublicKey]) -> PeerPublicKeyMap {
+        let mut map: HashMap<String, [u8; PUBLIC_KEY_BYTES]> = HashMap::new();
+
+        for peer_public_key in peer_public_keys.iter() {
+            map.insert(
+                base64_encode(&peer_public_key.kid[..]),
+                peer_public_key.public_key,
+            );
+        }
+
+        PeerPublicKeyMap(map)
+    }
+}
+
+impl Header {
+    fn is_valid(self: &Header) -> bool {
+        let typ: u8 = self.typ.into();
+
+        let now: u64 = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis() as u64,
+            _ => return false,
+        };
+
+        typ >= MIN_SUPPORTED_VERSION
+            && typ <= MAX_SUPPORTED_VERSION
+            && self.iat <= now
+            && self.exp > now
+    }
+}
+
+impl InternalHeader {
+    fn is_valid(self: &InternalHeader) -> bool {
+        let typ: u8 = self.typ.into();
+
+        let now: u64 = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis() as u64,
+            _ => return false,
+        };
+
+        self.base64_kid.len() == BASE64_KID_CHARS
+            && typ >= MIN_SUPPORTED_VERSION
+            && typ <= MAX_SUPPORTED_VERSION
+            && self.iat <= now
+            && self.exp > now
+    }
+}
+
+fn try_derive_typ(buf: &[u8]) -> Result<Typ, BWTError> {
+    let version: u8 = buf[3];
+
+    let mut diff: u8 = 0;
+
+    for i in 0..3 {
+        diff |= buf[i] ^ MAGIC_BWT[i];
+    }
+
+    if diff != 0 {
+        Err(BWTError::InvalidMagicBytes)
+    } else if version < MIN_SUPPORTED_VERSION || version > MAX_SUPPORTED_VERSION {
+        Err(BWTError::UnsupportedVersion(version))
+    } else {
+        Ok(Typ::try_from(version)?)
+    }
+}
+
+fn concat_token(aad: &[u8], ciphertext: &[u8], tag: &[u8]) -> String {
+    format!(
+        "{}.{}.{}",
+        base64_encode(aad),
+        base64_encode(ciphertext),
+        base64_encode(tag)
+    )
+}
 
 // /** Creates a nonce generator that is based on the current timestamp. */
 // function* createNonceGenerator(): Generator {

@@ -46,3 +46,95 @@ fn test_header_marshalling() -> Result<(), Box<Error>> {
 
     Ok(())
 }
+
+#[test]
+fn test_peer_public_key_map() -> Result<(), Box<Error>> {
+    let peer_public_keys: Vec<PeerPublicKey> = vec![
+        PeerPublicKey {
+            public_key: [0u8; PUBLIC_KEY_BYTES],
+            kid: [77, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        },
+        PeerPublicKey {
+            public_key: [0u8; PUBLIC_KEY_BYTES],
+            kid: [99, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        },
+    ];
+
+    let PeerPublicKeyMap(public_key_map): PeerPublicKeyMap =
+        PeerPublicKeyMap::from(&peer_public_keys[..]);
+
+    assert_eq!(public_key_map.len(), 2usize);
+    assert_eq!(public_key_map.get("QldU"), None);
+
+    let base64_kid_0: String = base64_encode(&peer_public_keys[0].kid);
+    let public_key_0: &[u8; PUBLIC_KEY_BYTES] = public_key_map.get(&base64_kid_0).unwrap();
+
+    let base64_kid_1: String = base64_encode(&peer_public_keys[1].kid);
+    let public_key_1: &[u8; PUBLIC_KEY_BYTES] = public_key_map.get(&base64_kid_1).unwrap();
+
+    assert_eq!(*public_key_0, [0u8; PUBLIC_KEY_BYTES]);
+    assert_eq!(*public_key_1, [0u8; PUBLIC_KEY_BYTES]);
+
+    Ok(())
+}
+
+#[test]
+fn test_concat_token() -> Result<(), Box<Error>> {
+    let aad: Vec<u8> = vec![66];
+    let ciphertext: Vec<u8> = vec![87];
+    let tag: Vec<u8> = vec![84];
+
+    let token: String = concat_token(&aad, &ciphertext, &tag);
+
+    assert_eq!(&token, "Qg==.Vw==.VA==");
+
+    Ok(())
+}
+
+#[test]
+fn test_is_valid_header() -> Result<(), Box<Error>> {
+    let invalid_header: Header = Header {
+        typ: Typ::BWTv0,
+        iat: 0,
+        exp: 1,
+        kid: [0u8; KID_BYTES],
+    };
+
+    let valid_header: Header = Header {
+        typ: Typ::BWTv0,
+        iat: 0,
+        exp: 9999999999999,
+        kid: [0u8; KID_BYTES],
+    };
+
+    assert!(!invalid_header.is_valid());
+    assert!(valid_header.is_valid());
+
+    Ok(())
+}
+
+#[test]
+fn test_is_valid_internal_header() -> Result<(), Box<Error>> {
+    let invalid_internal_header: InternalHeader = InternalHeader {
+        typ: Typ::BWTv0,
+        iat: 0,
+        exp: 1,
+        kid: [0u8; KID_BYTES],
+        nonce: [0u8; NONCE_BYTES],
+        base64_kid: "deadbeefdeadbeefdeadbeef".to_string(),
+    };
+
+    let valid_internal_header: InternalHeader = InternalHeader {
+        typ: Typ::BWTv0,
+        iat: 0,
+        exp: 9999999999999,
+        kid: [0u8; KID_BYTES],
+        nonce: [0u8; NONCE_BYTES],
+        base64_kid: "deadbeefdeadbeefdeadbeef".to_string(),
+    };
+
+    assert!(!invalid_internal_header.is_valid());
+    assert!(valid_internal_header.is_valid());
+
+    Ok(())
+}
